@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+src/.secdocs.md
 
 # ── Python ──
 __pycache__/

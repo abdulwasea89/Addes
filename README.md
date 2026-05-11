@@ -1,4 +1,4 @@
-# AdForge Backend
+# Adess Backend
 
 AI-powered ad creation backend. A user pastes any URL; the service scrapes the page, cleans the content with an LLM, drafts a brand-aligned outline, crafts a minimal image-generation prompt, generates an image, and persists the finished ad — ready for inline editing on the frontend.
 
