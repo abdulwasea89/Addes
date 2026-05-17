@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -59,13 +60,13 @@ def _build_engine() -> AsyncEngine:
 
     connect_args: dict[str, Any] = {}
     if "prepared_statement_cache_size=0" in url:
-        # Belt-and-braces for transaction-pooler mode.
         connect_args["statement_cache_size"] = 0
+    connect_args.setdefault("timeout", 10)
 
     return create_async_engine(
         url,
         echo=settings.app_env.value == "development" and settings.log_level == "debug",
-        pool_pre_ping=True,
+        pool_pre_ping=False,
         pool_size=5,
         max_overflow=10,
         connect_args=connect_args,
@@ -96,9 +97,12 @@ async def get_db() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency that yields an :class:`AsyncSession`.
 
     The session is committed on success and rolled back on any exception.
+    A ``statement_timeout`` is set per-session to prevent runaway queries.
     """
     async with get_sessionmaker()() as session:
         try:
+            settings = get_settings()
+            await session.execute(text(f"SET statement_timeout = '{settings.statement_timeout}'"))
             yield session
             await session.commit()
         except Exception:

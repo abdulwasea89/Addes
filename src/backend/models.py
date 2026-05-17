@@ -20,9 +20,11 @@ from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
+    Column,
     DateTime,
     ForeignKey,
     String,
+    Table,
     Text,
     func,
 )
@@ -31,6 +33,21 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base
+
+# ── Foreign-schema stub ────────────────────────────────────────────────
+# Supabase owns the ``auth.users`` table. Our FKs point at it, but
+# SQLAlchemy's flush-time topological sort walks the FK graph and refuses
+# to proceed if the referenced ``Table`` object is unknown to its metadata.
+#
+# Declaring a minimal stub (id column only) is enough to satisfy the graph
+# walk — we never read or write through this Table; Postgres still enforces
+# the real FK against the live ``auth.users`` row.
+auth_users = Table(
+    "users",
+    Base.metadata,
+    Column("id", PgUUID(as_uuid=True), primary_key=True),
+    schema="auth",
+)
 
 # ── Common column helpers ──────────────────────────────────────────────
 

@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS public.ads (
 );
 
 CREATE INDEX IF NOT EXISTS ads_user_id_idx ON public.ads(user_id);
-CREATE INDEX IF NOT EXISTS ads_created_at_idx ON public.ads(created_at DESC);
+CREATE INDEX IF NOT EXISTS ads_user_list_idx ON public.ads(user_id, created_at DESC, id DESC);
 
 ALTER TABLE public.ads ENABLE ROW LEVEL SECURITY;
 

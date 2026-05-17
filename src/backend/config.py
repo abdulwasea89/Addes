@@ -93,9 +93,16 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     replicate_api_key: SecretStr | None = None
 
+    # ── 7. Performance / hardening ──
+    statement_timeout: str = "30s"
+    idempotency_ttl: int = 3600
+
     # ── 6. Cloudflare scraping ──
     cloudflare_api_key: SecretStr | None = None
     cloudflare_account_id: str | None = None
+
+    # ── 8. Pollinations.ai (optional — bumps you from anonymous to seed tier) ──
+    pollinations_token: SecretStr | None = None
 
     # ── Derived helpers ─────────────────────────────────────────────
 
@@ -135,10 +142,7 @@ class Settings(BaseSettings):
         """Confirm the database URL targets the async driver."""
         url = self.database_url.get_secret_value()
         if not url.startswith("postgresql+asyncpg://"):
-            raise ValueError(
-                "DATABASE_URL must use the asyncpg driver: "
-                "postgresql+asyncpg://..."
-            )
+            raise ValueError("DATABASE_URL must use the asyncpg driver: postgresql+asyncpg://...")
         return self
 
 

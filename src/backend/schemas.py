@@ -47,9 +47,25 @@ AdStatus = Literal["draft", "published", "archived"]
 #: literal — the routers will then accept it automatically.
 LLMModel = Literal["gemini", "groq"]
 
-#: Allowed image generation providers. ``dalle3`` uses the OpenAI Images API;
-#: ``flux`` and ``sd`` route to Replicate (see ``services/image_gen.py``).
-ImageModel = Literal["dalle3", "flux", "sd"]
+#: Allowed image generation providers. See ``services/image_gen.py`` for
+#: routing.
+#:
+#: Recommendations (May 2026 catalog):
+#: * ``pollinations``       — **default**. Free, no signup, FLUX-tier quality.
+#: * ``pollinations-turbo`` — Pollinations' fast variant, lower quality.
+#: * ``flux``               — Cloudflare FLUX.1 schnell, ~3-5 s.
+#: * ``sdxl-lightning``     — Cloudflare ByteDance SDXL Lightning, 2-step.
+#: * ``dreamshaper``        — Cloudflare DreamShaper 8 LCM, photorealistic.
+#: * ``sd``                 — Cloudflare SDXL base 1.0, legacy.
+ImageModel = Literal[
+    "pollinations",
+    "pollinations-turbo",
+    "flux",
+    "sdxl-lightning",
+    "dreamshaper",
+    "sd",
+    "dalle3",
+]
 
 #: Whitelisted DALL-E / Replicate sizes. Keeping this as a literal means
 #: invalid sizes get rejected at validation time rather than burning provider
@@ -108,7 +124,7 @@ class AdCreate(_Strict):
     description: str | None = None
     source_url: HttpUrl | None = None
     image_url: HttpUrl | None = None
-    image_model: str = Field(default="dalle3", max_length=64)
+    image_model: str = Field(default="pollinations", max_length=64)
     status: AdStatus = "draft"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -146,7 +162,11 @@ class AdResponse(_ORM):
     image_model: str
     status: AdStatus
     metadata: dict[str, Any] = Field(
-        validation_alias=AliasChoices("metadata", "meta"),
+        # Try the ORM attribute name (``meta``) first — the ``metadata`` name
+        # also exists on every SQLAlchemy declarative class as the shared
+        # ``MetaData()`` registry, and Pydantic would happily pick it up,
+        # blowing up validation with ``input should be a valid dictionary``.
+        validation_alias=AliasChoices("meta", "metadata"),
         serialization_alias="metadata",
     )
     created_at: datetime
@@ -154,10 +174,16 @@ class AdResponse(_ORM):
 
 
 class AdListResponse(_Strict):
-    """Body of ``GET /api/ads``."""
+    """Body of ``GET /api/ads``.
+
+    Pagination is cursor-based: ``next_cursor`` is the ``id`` of the last item
+    in the current page. Pass it as ``?cursor=...`` on the next request to
+    fetch the subsequent page. ``null`` means there are no more results.
+    """
 
     items: list[AdResponse]
     count: int = Field(ge=0)
+    next_cursor: str | None = None
 
 
 class AdVersionResponse(_ORM):
@@ -169,7 +195,11 @@ class AdVersionResponse(_ORM):
     description: str | None
     image_url: str | None
     metadata: dict[str, Any] = Field(
-        validation_alias=AliasChoices("metadata", "meta"),
+        # Try the ORM attribute name (``meta``) first — the ``metadata`` name
+        # also exists on every SQLAlchemy declarative class as the shared
+        # ``MetaData()`` registry, and Pydantic would happily pick it up,
+        # blowing up validation with ``input should be a valid dictionary``.
+        validation_alias=AliasChoices("meta", "metadata"),
         serialization_alias="metadata",
     )
     created_at: datetime
@@ -252,7 +282,7 @@ class PromptResponse(_Strict):
 
 class ImageRequest(_Strict):
     prompt: str = Field(min_length=1, max_length=4000)
-    model: ImageModel = "dalle3"
+    model: ImageModel = "pollinations"
     size: ImageSize = "1024x1024"
 
 

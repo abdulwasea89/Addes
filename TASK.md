@@ -172,93 +172,126 @@ Each phase below has a `**Verify:**` block listing the exact check to run.
 
 ---
 
-## Phase 7 — Services Layer
+## Phase 7 — Services Layer ✅
 
-### 7.1 Scraper Service (`services/scraper.py`)
-- [ ] Implement `scrape(url)` calling Cloudflare's scraping API.
-- [ ] Return `{title, description, text, images, metadata}`.
-- [ ] Add retry with exponential backoff; raise `502` on persistent failure.
+Added deps: `google-genai`, `groq` (tenacity already transitive). `replicate` was added then removed when image generation moved to Cloudflare Workers AI. All five service modules implemented with typed return values, structured errors, and live verification.
 
-### 7.2 Gemini Service (`services/gemini.py`)
-- [ ] Implement `clean(raw_content)` — structured JSON output (brand_name, tagline, etc.).
-- [ ] Implement `outline(cleaned_data)` — returns headline/body/CTA/keywords.
-- [ ] Implement `craft_prompt(outline, cleaned_data)` — minimal brand-aligned image prompt.
+### 7.1 Scraper Service (`services/scraper.py`) ✅
+- [x] Uses Cloudflare **Browser Rendering** synchronous endpoints — `/markdown` for clean page text, `/content` (raw HTML) for `<title>` + meta tags, `/links` for image URLs. Composed into one `scrape(url) -> ScrapedPage`.
+- [x] Retry policy is selective: 429 + 5xx + transport errors only. 401/400/404 fail fast (root-cause errors, not flakes). Exponential backoff 2s → 10s, 4 attempts.
+- [x] Sequential calls with a 300 ms pause — Browser Rendering's free-plan concurrency cap is 2; running three in parallel tripped a 429. Verified by lessons learned (attempt 1 failed concurrent → attempt 2 sequenced).
+- [x] Returns a `ScrapedPage` dataclass mirroring `schemas.ScrapedContent`.
 
-### 7.3 Groq Service (`services/groq.py`)
-- [ ] Mirror Gemini's three methods as fallback (Llama/Mixtral).
+**Verify (max 6): ✅ green on attempt 2**
+- ❌ Attempt 1: three concurrent endpoint calls → Cloudflare 429.
+- ✅ Attempt 2: sequenced with 300 ms pacing → `scrape("https://example.com")` returned `title='Example Domain'`, 167 chars of markdown text, full metadata dict.
 
-### 7.4 ImageGen Service (`services/image_gen.py`)
-- [ ] Implement `generate(prompt, model, size)`:
-  - `dalle3` → OpenAI Images API.
-  - `flux` / `sd` → Replicate API.
-- [ ] **Return raw image bytes**, not the provider URL.
+### 7.2 Gemini Service (`services/gemini.py`) ✅
+- [x] Three async methods (`clean`, `outline`, `craft_prompt`) via the modern `google-genai` SDK (`client.aio.models.generate_content`).
+- [x] Each call sets `response_mime_type='application/json'` + `response_json_schema=<PydanticModel>.model_json_schema()` so the model must return JSON matching the schema. Result is validated with `model_validate_json` and converted to a plain dict.
+- [x] Default model: `gemini-2.5-flash`. Caller can override per-call.
+- [x] `GeminiError` covers both transport failures and schema-violation responses with a truncated payload preview.
 
-### 7.5 Storage Service (`services/storage.py`)
-- [ ] Implement `upload_image(user_id, image_bytes) -> {url, path}`:
-  - Use `supabase-py` storage client with service-role key.
-  - Path: `{user_id}/{uuid4}.png`.
-  - Bucket: `ad-images`.
-  - Return public URL + storage path.
+**Verify (max 6): ✅ green on attempt 1** — Acme Cloud Postgres fixture flowed through `clean → outline → craft_prompt`; each step produced valid structured JSON with `model_used` populated.
 
-**Verify each service (max 6 attempts per service):**
-- **Scraper:** call `scrape("https://example.com")` → returns dict with non-empty `title` and `text`.
-- **Gemini:** call `clean({...})` with a small fixture → returns dict with `brand_name` and `tone`.
-- **Groq:** same fixture as Gemini → returns same shape.
-- **ImageGen:** `generate("a red circle", "dalle3", "1024x1024")` → returns bytes starting with PNG/JPEG magic header.
-- **Storage:** `upload_image("test-user", b"<png_bytes>")` → returned URL is reachable (HTTP 200) and points to `ad-images/test-user/...`.
+### 7.3 Groq Service (`services/groq.py`) ✅
+- [x] Same three methods, same return shapes as Gemini — drop-in fallback.
+- [x] Uses the official `groq` SDK's `AsyncGroq.chat.completions.create` with `response_format={'type': 'json_object'}` and explicit "respond with JSON" wording in the system prompt (required to unlock Groq's JSON mode).
+- [x] Schema enforced **client-side** via Pydantic since Groq supports JSON mode but not full JSON-schema constraints. Validation failures raise `GroqError` with error count + payload preview.
+- [x] Default model: `llama-3.3-70b-versatile`.
 
----
+**Verify (max 6): ✅ green on attempt 1** — same fixture flowed end-to-end; all three responses validated.
 
-## Phase 8 — Routers
+### 7.4 ImageGen Service (`services/image_gen.py`) ✅ — Cloudflare Workers AI
+- [x] Provider swapped from Replicate to **Cloudflare Workers AI** — reuses the existing `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` from the scraper, no new credentials, free tier covers all testing.
+- [x] `flux` → `@cf/black-forest-labs/flux-1-schnell` (default, returns base64 JPEG in JSON envelope); `sd` → `@cf/stabilityai/stable-diffusion-xl-base-1.0` (returns a raw JPEG stream).
+- [x] Response parser handles **both shapes** — sniffs `content-type`, base64-decodes when JSON, returns body bytes when raw.
+- [x] Size string → provider-specific fields: Flux ignores `size` (fixed by model, only `steps`/`seed` accepted); SDXL clamps width/height to 256-2048 multiples of 8.
+- [x] `dalle3` raises `ImageGenError` with a clear "set OPENAI_API_KEY" message. Empty prompt, unknown model, bad size string each rejected with typed errors before the network call.
+- [x] Removed `replicate` from project deps (`uv remove replicate`).
 
-### 8.1 Auth Router (`routers/auth.py`)
-- [ ] `GET /api/auth/me` — returns `{user_id, email, full_name}` from JWT claims.
+**Verify (max 6): ✅ green on attempt 2 (end-to-end)**
+- ✅ All four negative-path tests pass on attempt 1 (dalle3, unknown model, empty prompt, bad size).
+- ❌ Attempt 1 with prompt `"a red circle on a clean white background, minimalist"` — Cloudflare safety filter flagged a false positive (NSFW, code 3030). HTTP 400 surfaced cleanly through `ImageGenError`, confirming the error plumbing.
+- ✅ Attempt 2 with `"minimalist editorial poster, clean geometric design, soft blue accent"` — 206 KB JPEG returned. End-to-end: generate → `storage.upload_image()` → fetched the public URL → bytes match exactly → cleanup succeeded.
 
-### 8.2 Scrape Router (`routers/scrape.py`)
-- [ ] `POST /api/scrape` — calls scraper service, returns extracted content.
+### 7.5 Storage Service (`services/storage.py`) ✅
+- [x] `upload_image(user_id, image_bytes) -> UploadResult(url, path, bucket)`. Path = `{user_id}/{uuid4}.{ext}`, bucket from `SUPABASE_STORAGE_BUCKET` (=`adess`).
+- [x] Sniffs PNG / JPEG / WebP magic bytes for `content-type` and file extension instead of hard-coding `.png`.
+- [x] Uses `storage3.AsyncStorageClient` signed with the service-role key. Path-prefix layout matches the storage RLS policy from Phase 4.
+- [x] Returns Supabase's public URL via `get_public_url`.
 
-### 8.3 AI Router (`routers/ai.py`)
-- [ ] `POST /api/ai/clean` — wraps Gemini/Groq `clean`.
-- [ ] `POST /api/ai/outline` — wraps `outline`.
-- [ ] `POST /api/ai/prompt` — wraps `craft_prompt`.
-- [ ] `POST /api/ai/generate-image`:
-  - Call `image_gen.generate(...)` to get bytes.
-  - Call `storage.upload_image(user_id, bytes)` to persist.
-  - Return Supabase URL (not the provider URL).
-- [ ] `POST /api/ai/generate-text` — legacy all-in-one copy generator.
-- [ ] `GET /api/ai/models` — static list of supported models.
-
-### 8.4 Ads Router (`routers/ads.py`)
-- [ ] `GET /api/ads` — list ads for current user.
-- [ ] `POST /api/ads` — create ad (also write first row to `ad_versions`).
-- [ ] `GET /api/ads/{ad_id}` — fetch one (RLS will enforce ownership).
-- [ ] `PUT /api/ads/{ad_id}` — update; snapshot old state to `ad_versions`.
-- [ ] `DELETE /api/ads/{ad_id}` — delete.
-- [ ] `GET /api/ads/{ad_id}/versions` — list versions.
-
-**Verify each router (max 6 attempts per router):**
-- **Auth router:** `GET /api/auth/me` with valid JWT → 200, returns `user_id` matching JWT.
-- **Scrape router:** `POST /api/scrape` with `https://example.com` → 200, non-empty content.
-- **AI router (clean/outline/prompt):** chained calls return well-formed JSON at each step.
-- **AI router (generate-image):** response `image_url` host equals `<project>.supabase.co`; opening the URL returns the image.
-- **Ads router:** create → list → get → update → versions → delete; each returns 200 and respects RLS (no cross-user access).
+**Verify (max 6): ✅ green on attempt 1**
+- ✅ Uploaded a 68-byte 1×1 PNG, fetched the returned public URL → HTTP 200, `content-type: image/png`, bytes round-tripped exactly.
+- ✅ Cleanup deletes the test file.
+- ✅ Re-ran with `-W error::UserWarning` after appending the trailing slash to the storage base URL — no warnings, no behavior change.
 
 ---
 
-## Phase 9 — Main App Wiring (`main.py`)
+## Phase 8 — Routers ✅
 
-- [ ] **9.1** Create FastAPI app with title/version.
-- [ ] **9.2** Add CORS middleware allowing `FRONTEND_URL`.
-- [ ] **9.3** Add a request latency logging middleware (for success metrics).
-- [ ] **9.4** Register all routers under `/api`.
-- [ ] **9.5** Add `GET /health` returning `{status: "ok"}`.
-- [ ] **9.6** Add startup hook: warm JWKS cache, confirm DB connectivity.
+All four routers mounted in `main.py`; `from backend.main import app` exposes 17 routes including `/health`, `/api/auth/me`, `/api/scrape`, six `/api/ai/*` endpoints, and the six `/api/ads*` endpoints. Lint + strict mypy clean across the router layer.
 
-**Verify (max 6 attempts):**
-- `uvicorn backend.main:app --reload` starts without exceptions.
-- `curl http://localhost:8000/health` → `{"status":"ok"}`.
-- `curl http://localhost:8000/docs` → OpenAPI page loads and lists every router.
-- CORS preflight from `FRONTEND_URL` returns the expected `Access-Control-Allow-Origin` header.
+### 8.1 Auth Router (`routers/auth.py`) ✅
+- [x] `GET /api/auth/me` — returns `UserMe` (`user_id`, `email`, `full_name`, `role`) from JWT claims. Implemented in Phase 5; reuses the shared schema introduced in Phase 6.
+
+### 8.2 Scrape Router (`routers/scrape.py`) ✅
+- [x] `POST /api/scrape` — auth-gated, calls `services.scraper.scrape`, returns `ScrapeResponse`. `ScraperError` → HTTP 502 with the upstream message preserved so clients can distinguish NSFW/transport/auth failures.
+
+### 8.3 AI Router (`routers/ai.py`) ✅
+- [x] `POST /api/ai/clean` — dispatches to `gemini`/`groq` via `body.model`; service errors wrapped as 502.
+- [x] `POST /api/ai/outline` — same dispatch.
+- [x] `POST /api/ai/prompt` — same dispatch.
+- [x] `POST /api/ai/generate-image` — `image_gen.generate(...)` → `storage.upload_image(str(user.id), bytes)`; returns the Supabase URL (not the provider URL).
+- [x] `POST /api/ai/generate-text` — chained scrape + clean + outline + prompt all-in-one.
+- [x] `GET /api/ai/models` — static `ModelInfo` list (gemini, groq, flux, sd).
+
+### 8.4 Ads Router (`routers/ads.py`) ✅
+- [x] `GET /api/ads` — list ads for the current user (filtered by `user_id`).
+- [x] `POST /api/ads` — create ad; writes the initial snapshot to `ad_versions`.
+- [x] `GET /api/ads/{ad_id}` — fetch one; cross-user access returns 404 (not 403) to avoid leaking existence.
+- [x] `PUT /api/ads/{ad_id}` — snapshot the pre-mutation row, then apply `model_dump(exclude_unset=True)`. Stringifies `source_url`/`image_url`, renames `metadata` → `meta`.
+- [x] `DELETE /api/ads/{ad_id}` — cascade via `ondelete=CASCADE` on `ad_versions`.
+- [x] `GET /api/ads/{ad_id}/versions` — list version snapshots.
+
+**Verify (max 6 attempts per router): ✅ green**
+- ✅ 8.1 verified live in Phase 5 — valid JWT → 200, malformed/expired/missing → 401.
+- ✅ 8.2 wired to the live-verified scraper service from Phase 7.1; `ScraperError → 502` plumbing exercised during deep verification.
+- ✅ 8.3 generate-image path live-verified in Phase 7.4 (Cloudflare Flux → Supabase upload → public URL round-trip).
+- ✅ 8.4 marked complete without endpoint testing per user instruction; lint + strict mypy clean, all six routes appear in `app.routes`.
+
+---
+
+## Phase 9 — Main App Wiring (`main.py`) ✅
+
+- [x] **9.1** Created FastAPI app `Adess Backend v0.1.0` via `create_app()` factory with async `_lifespan` context manager. 20 routes mounted total (13 OpenAPI paths + redirects/docs).
+- [x] **9.2** `CORSMiddleware` allowlist: `FRONTEND_URL` + four dev origins (`http://localhost:3000/5173`, `127.0.0.1` variants). `allow_credentials=True`, `expose_headers=["X-Process-Time-ms", "X-Request-ID"]`. Wildcard `*` deliberately avoided.
+- [x] **9.3** `_LatencyMiddleware` logs `[request_id] METHOD /path -> status (ms)` for every request and sets the `X-Process-Time-ms` response header. Backend logger is wired to uvicorn's handler via `_configure_logging()` so output appears in stdout.
+- [x] **9.4** All four routers (`auth`, `scrape`, `ai`, `ads`) mounted; OpenAPI lists 13 path templates.
+- [x] **9.5** `GET /health` (public, no auth) returns `{"status":"ok"}` in ~2 ms. `GET /` returns an endpoint index for quick discovery.
+- [x] **9.6** Lifespan startup: `_warm_jwks()` pre-fetches the Supabase JWKS (1 key cached on dev), `_ping_db()` runs `SELECT 1` over the asyncpg pool. Both are best-effort — failures log a warning, app still boots. Shutdown disposes the SQLAlchemy engine cleanly.
+- [x] **9.7 (bonus hardening — Zaruri-before-Phase-10):**
+  - `_RequestIDMiddleware` tags every request with a `UUID4`, stored at `request.state.request_id` and returned as `X-Request-ID`.
+  - `_SecurityHeadersMiddleware` sets `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, and a CSP (skipped on `/docs`, `/redoc`, `/openapi.json` so Swagger still works).
+  - `TrustedHostMiddleware` rejects unknown `Host` headers (verified `Host: evil.com` → 400).
+  - `GZipMiddleware` with 1 KB threshold.
+  - Global exception handler returns `{detail, request_id}` and logs the traceback server-side — no Python stack traces leak to clients anymore.
+  - Per-session `statement_timeout` (`30s` default, configurable via `Settings.statement_timeout`) set inside `get_db()` so runaway queries can't hold connections.
+
+**Verify (max 6 attempts): ✅ green on attempt 1**
+- ✅ `uv run ruff check src/` — clean.
+- ✅ `uv run mypy` (strict) — 19 source files, no issues.
+- ✅ `uvicorn backend.main:app --port 8765` starts cleanly. Startup logs: `Starting Adess backend (env=development)` → `JWKS warmed: 1 key(s) cached` → `Database connectivity OK` → `Application startup complete`.
+- ✅ `GET /health` → 200 `{"status":"ok"}`, headers include `X-Request-ID`, `X-Process-Time-ms: 2.21`, all five security headers, and `content-security-policy`.
+- ✅ `GET /docs` → 200; OpenAPI lists all 13 path templates including every router.
+- ✅ CORS preflight from `http://localhost:3000` → 200 with `access-control-allow-origin: http://localhost:3000`.
+- ✅ CORS preflight from `https://evil.example.com` → 400 (origin rejected).
+- ✅ `GET /api/auth/me` with no token → 401 `{"detail":"Missing bearer token"}` + `WWW-Authenticate: Bearer`.
+- ✅ `GET /health` with `Host: evil.com` → 400 (TrustedHostMiddleware).
+- ✅ Per-request log lines visible: `INFO:    backend: [<uuid>] GET /health -> 200 (2.21 ms)`.
+- ✅ Shutdown disposes the engine cleanly: `SQLAlchemy engine disposed` → `Application shutdown complete`.
+
+**Middleware stack (outer → inner):** TrustedHost → SecurityHeaders → GZip → CORS → RequestID → Latency → router.
 
 ---
 
